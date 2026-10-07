@@ -38,6 +38,67 @@ const normalizeText = (str) => {
 };
 
 /**
+ * Decode các HTML Entity tiếng Việt phổ biến sang ký tự Unicode chuẩn
+ */
+function decodeHtmlEntities(str) {
+  if (!str) return '';
+  const htmlEntityMap = {
+    '&aacute;': 'á', '&agrave;': 'à', '&ả;': 'ả', '&atilde;': 'ã', '&ạ;': 'ạ',
+    '&Aacute;': 'Á', '&Agrave;': 'À', '&Ả;': 'Ả', '&Atilde;': 'Ã', '&Ạ;': 'Ạ',
+    '&acirc;': 'â', '&ấ;': 'ấ', '&ầ;': 'ầ', '&ẩ;': 'ẩ', '&ẫ;': 'ẫ', '&ậ;': 'ậ',
+    '&Acirc;': 'Â', '&Ấ;': 'Ấ', '&Ầ;': 'Ầ', '&Ẩ;': 'Ẩ', '&Ẫ;': 'Ẫ', '&Ậ;': 'Ậ',
+    '&ă;': 'ă', '&ắ;': 'ắ', '&ằ;': 'ằ', '&ẳ;': 'ẳ', '&ẵ;': 'ẵ', '&ặ;': 'ặ',
+    '&Ă;': 'Ă', '&Ắ;': 'Ắ', '&Ằ;': 'Ằ', '&Ẳ;': 'Ẳ', '&Ẵ;': 'Ẵ', '&Ặ;': 'Ặ',
+    '&eacute;': 'é', '&egrave;': 'è', '&ẻ;': 'ẻ', '&ẽ;': 'ẽ', '&ẹ;': 'ẹ',
+    '&Eacute;': 'É', '&Egrave;': 'È', '&Ẻ;': 'Ẻ', '&Etilde;': 'Ẽ', '&Ẹ;': 'Ẹ',
+    '&ecirc;': 'ê', '&ế;': 'ế', '&ề;': 'ề', '&ể;': 'ể', '&ễ;': 'ễ', '&ệ;': 'ệ',
+    '&Ecirc;': 'Ê', '&Ế;': 'Ế', '&Ề;': 'Ề', '&Ể;': 'Ể', '&Ễ;': 'Ễ', '&Ệ;': 'Ệ',
+    '&iacute;': 'í', '&igrave;': 'ì', '&ỉ;': 'ỉ', '&ĩ;': 'ĩ', '&ị;': 'ị',
+    '&Iacute;': 'Í', '&Igrave;': 'Ì', '&Ỉ;': 'Ỉ', '&Itilde;': 'Ĩ', '&Ị;': 'Ị',
+    '&oacute;': 'ó', '&ograve;': 'ò', '&ỏ;': 'ỏ', '&otilde;': 'õ', '&ọ;': 'ọ',
+    '&Oacute;': 'Ó', '&Ograve;': 'Ò', '&Ỏ;': 'Ỏ', '&Otilde;': 'Õ', '&Ọ;': 'Ọ',
+    '&ocirc;': 'ô', '&ố;': 'ố', '&ồ;': 'ồ', '&ổ;': 'ổ', '&ỗ;': 'ỗ', '&ộ;': 'ộ',
+    '&Ocirc;': 'Ô', '&Ố;': 'Ố', '&Ồ;': 'Ồ', '&Ổ;': 'Ổ', '&Ỗ;': 'Ỗ', '&Ộ;': 'Ộ',
+    '&ơ;': 'ơ', '&ớ;': 'ớ', '&ờ;': 'ờ', '&ở;': 'ở', '&ỡ;': 'ỡ', '&ợ;': 'ợ',
+    '&Ocirc;': 'Ơ', '&Ớ;': 'Ớ', '&Ờ;': 'Ờ', '&Ở;': 'Ở', '&Ỡ;': 'Ỡ', '&Ợ;': 'Ợ',
+    '&uacute;': 'ú', '&ugrave;': 'ù', '&ủ;': 'ủ', '&ũ;': 'ũ', '&ụ;': 'ụ',
+    '&Uacute;': 'Ú', '&Ugrave;': 'Ù', '&Ủ;': 'Ủ', '&Utilde;': 'Ũ', '&Ụ;': 'Ụ',
+    '&ư;': 'ư', '&ứ;': 'ứ', '&ừ;': 'ừ', '&ử;': 'ử', '&ữ;': 'ữ', '&ự;': 'ự',
+    '&Uhorn;': 'Ư', '&Ứ;': 'Ứ', '&Ừ;': 'Ừ', '&Ử;': 'Ử', '&Ữ;': 'Ữ', '&Ự;': 'Ự',
+    '&yacute;': 'ý', '&ygrave;': 'ỳ', '&ỷ;': 'ỷ', '&ỹ;': 'ỹ', '&ỵ;': 'ỵ',
+    '&Yacute;': 'Ý', '&Ygrave;': 'Ỳ', '&Ỷ;': 'Ỷ', '&Ytilde;': 'Ỹ', '&Ỵ;': 'Ỵ',
+    '&đ;': 'đ', '&Đ;': 'Đ', '&quot;': '"', '&ldquo;': '"', '&rdquo;': '"',
+    '&lsquo;': "'", '&rsquo;': "'", '&ndash;': '-', '&mdash;': '-',
+    '&hellip;': '...', '&amp;': '&', '&nbsp;': ' '
+  };
+  let res = str;
+  for (const [k, v] of Object.entries(htmlEntityMap)) {
+    res = res.replaceAll(k, v);
+  }
+  res = res.replace(/&#(\d+);/g, (_, code) => String.fromCharCode(+code));
+  res = res.replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCharCode(parseInt(code, 16)));
+  return res;
+}
+
+/**
+ * Làm sạch mô tả phim từ HTML sang Text thuần tiếng Việt chuẩn
+ */
+const cleanSynopsis = (rawText) => {
+  if (!rawText) return null;
+  const decoded = decodeHtmlEntities(rawText);
+  const stripped = String(decoded)
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<br\s*[\/]?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n\s+\n/g, '\n\n')
+    .trim();
+  return stripped.length > 0 ? stripped : null;
+};
+
+/**
  * Bảng tra cứu Tỉnh / Thành phố chuẩn hoá cho CineHub Schema v3
  */
 const PROVINCE_MAP = {
@@ -94,7 +155,6 @@ const PROVINCE_MAP = {
 const extractProvince = (address) => {
   if (!address) return { code: 'KHAC', name: 'Khác', nameNormalized: 'khac' };
 
-  // Xử lý các trường hợp xuống dòng hoặc dấu gạch nối trong địa chỉ
   const cleanAddress = address.replace(/[\r\n]+/g, ', ');
   const parts = cleanAddress.split(',').map(p => p.trim()).filter(Boolean);
   const lastPart = parts[parts.length - 1] || '';
@@ -104,14 +164,12 @@ const extractProvince = (address) => {
     return PROVINCE_MAP[normLast];
   }
 
-  // Quét qua danh sách các từ khóa tỉnh thành đã biết
   for (const [key, val] of Object.entries(PROVINCE_MAP)) {
     if (normLast.includes(key) || normalizeText(cleanAddress).endsWith(key)) {
       return val;
     }
   }
 
-  // Fallback nếu có tỉnh thành mới
   let cleanName = lastPart.replace(/^(TP\.?|Thành phố|Tỉnh)\s+/i, '').trim();
   if (!cleanName) cleanName = 'Khác';
   const normName = normalizeText(cleanName);
@@ -126,7 +184,6 @@ const extractProvince = (address) => {
 
 /**
  * Trích xuất Phường/Xã/Thị trấn từ chuỗi địa chỉ
- * Phù hợp với Schema v3 (Ward model)
  */
 const extractWard = (address) => {
   if (!address) return null;
@@ -248,7 +305,7 @@ const calculateEndTime = (startUtc, durationMin) => {
 };
 
 /**
- * Sinh DedupKey cho Showtime theo quy chuẩn Schema v3:
+ * Sinh DedupKey cho Showtime:
  * sha1(chain:cinemaCode:movieId:startTimeUTC:format) – KHÔNG chứa auditorium
  */
 const generateShowtimeDedupKey = (chain, cinemaCode, movieId, startTimeUTC, format) => {
@@ -268,6 +325,7 @@ const generatePromotionDedupKey = (chain, identifier) => {
 module.exports = {
   toSlug,
   normalizeText,
+  cleanSynopsis,
   extractProvince,
   extractWard,
   mapAgeRating,

@@ -1,5 +1,6 @@
 /**
  * seed.js - Seed dữ liệu Galaxy Cinema đã chuẩn hoá vào DB Prisma (Schema v3)
+ * Bao gồm đầy đủ: Rạp, Phòng chiếu, Thể loại, Diễn viên, Đạo diễn, Phim, Phân vai, Suất chiếu & Khuyến mãi
  * Chạy lệnh: node seed.js (hoặc npx prisma db seed)
  */
 
@@ -20,7 +21,7 @@ async function main() {
   const data = JSON.parse(rawData);
 
   console.log('═══════════════════════════════════════════════════════════════');
-  console.log('🚀 Bắt đầu Seed dữ liệu Galaxy Cinema vào CineHub Database');
+  console.log('🚀 Bắt đầu Seed dữ liệu Galaxy Cinema đầy đủ vào CineHub DB');
   console.log('═══════════════════════════════════════════════════════════════');
 
   // 1. Upsert CinemaChain
@@ -175,8 +176,43 @@ async function main() {
     auditoriumMap.set(`${aud.cinemaExternalId}_${aud.name}`, a.id);
   }
 
-  // 6. Upsert Movies & MovieSources
-  console.log(`6️⃣  Upsert ${data.movies.length} Movies & Sources...`);
+  // 6. Upsert Genres (Thể loại phim)
+  console.log(`6️⃣  Upsert ${data.genres?.length || 0} Genres...`);
+  const genreMap = new Map();
+  if (data.genres) {
+    for (const g of data.genres) {
+      const genre = await prisma.genre.upsert({
+        where: { slug: g.slug },
+        update: { name: g.name },
+        create: { slug: g.slug, name: g.name }
+      });
+      genreMap.set(g.slug, genre.id);
+    }
+  }
+
+  // 7. Upsert Persons (Diễn viên & Đạo diễn)
+  console.log(`7️⃣  Upsert ${data.persons?.length || 0} Persons (Diễn viên & Đạo diễn)...`);
+  const personMap = new Map();
+  if (data.persons) {
+    for (const p of data.persons) {
+      const person = await prisma.person.upsert({
+        where: { nameNormalized: p.nameNormalized },
+        update: {
+          fullName: p.fullName,
+          photoUrl: p.photoUrl
+        },
+        create: {
+          fullName: p.fullName,
+          nameNormalized: p.nameNormalized,
+          photoUrl: p.photoUrl
+        }
+      });
+      personMap.set(p.nameNormalized, person.id);
+    }
+  }
+
+  // 8. Upsert Movies & MovieSources
+  console.log(`8️⃣  Upsert ${data.movies.length} Movies & Sources...`);
   const movieMap = new Map();
   for (const movie of data.movies) {
     const m = await prisma.movie.upsert({
@@ -184,6 +220,7 @@ async function main() {
       update: {
         title: movie.title,
         titleNormalized: movie.titleNormalized,
+        synopsis: movie.synopsis,
         durationMin: movie.durationMin,
         releaseDate: movie.releaseDate ? new Date(movie.releaseDate) : null,
         endDate: movie.endDate ? new Date(movie.endDate) : null,
@@ -193,12 +230,14 @@ async function main() {
         posterUrl: movie.posterUrl,
         backdropUrl: movie.backdropUrl,
         trailerUrl: movie.trailerUrl,
-        language: movie.language
+        language: movie.language,
+        country: movie.country
       },
       create: {
         slug: movie.slug,
         title: movie.title,
         titleNormalized: movie.titleNormalized,
+        synopsis: movie.synopsis,
         durationMin: movie.durationMin,
         releaseDate: movie.releaseDate ? new Date(movie.releaseDate) : null,
         endDate: movie.endDate ? new Date(movie.endDate) : null,
@@ -208,7 +247,8 @@ async function main() {
         posterUrl: movie.posterUrl,
         backdropUrl: movie.backdropUrl,
         trailerUrl: movie.trailerUrl,
-        language: movie.language
+        language: movie.language,
+        country: movie.country
       }
     });
     movieMap.set(movie.externalId, m.id);
@@ -250,8 +290,63 @@ async function main() {
     });
   }
 
-  // 7. Upsert Showtimes
-  console.log(`7️⃣  Upsert ${data.showtimes.length} Showtimes...`);
+  // 9. Upsert MovieGenres (Phim - Thể loại)
+  console.log(`9️⃣  Upsert ${data.movieGenres?.length || 0} Movie-Genre relations...`);
+  if (data.movieGenres) {
+    for (const mg of data.movieGenres) {
+      const movieId = movieMap.get(mg.movieExternalId);
+      const genreId = genreMap.get(mg.genreSlug);
+      if (!movieId || !genreId) continue;
+
+      await prisma.movieGenre.upsert({
+        where: {
+          movieId_genreId: {
+            movieId: movieId,
+            genreId: genreId
+          }
+        },
+        update: {},
+        create: {
+          movieId: movieId,
+          genreId: genreId
+        }
+      });
+    }
+  }
+
+  // 🔟 Upsert MovieCredits (Đạo diễn / Diễn viên của từng phim)
+  console.log(`🔟 Upsert ${data.movieCredits?.length || 0} Movie-Credit relations...`);
+  if (data.movieCredits) {
+    for (const mc of data.movieCredits) {
+      const movieId = movieMap.get(mc.movieExternalId);
+      const personId = personMap.get(mc.personNameNormalized);
+      if (!movieId || !personId) continue;
+
+      await prisma.movieCredit.upsert({
+        where: {
+          movieId_personId_role: {
+            movieId: movieId,
+            personId: personId,
+            role: mc.role
+          }
+        },
+        update: {
+          billingOrder: mc.billingOrder,
+          characterName: mc.characterName
+        },
+        create: {
+          movieId: movieId,
+          personId: personId,
+          role: mc.role,
+          billingOrder: mc.billingOrder,
+          characterName: mc.characterName
+        }
+      });
+    }
+  }
+
+  // 1️⃣1️⃣ Upsert Showtimes
+  console.log(`1️⃣1️⃣ Upsert ${data.showtimes.length} Showtimes...`);
   let showtimeSuccessCount = 0;
   for (const st of data.showtimes) {
     const cinemaId = cinemaMap.get(st.cinemaExternalId);
@@ -302,8 +397,8 @@ async function main() {
     showtimeSuccessCount++;
   }
 
-  // 8. Upsert Promotions
-  console.log(`8️⃣  Upsert ${data.promotions.length} Promotions...`);
+  // 1️⃣2️⃣ Upsert Promotions
+  console.log(`1️⃣2️⃣ Upsert ${data.promotions.length} Promotions...`);
   for (const promo of data.promotions) {
     await prisma.promotion.upsert({
       where: { dedupKey: promo.dedupKey },
@@ -328,10 +423,12 @@ async function main() {
 
   console.log('═══════════════════════════════════════════════════════════════');
   console.log('🎉 SEED DỮ LIỆU HOÀN TẤT THÀNH CÔNG!');
-  console.log(`   - Rạp: ${cinemaMap.size}`);
-  console.log(`   - Phòng chiếu: ${auditoriumMap.size}`);
-  console.log(`   - Phim: ${movieMap.size}`);
-  console.log(`   - Suất chiếu: ${showtimeSuccessCount}`);
+  console.log(`   - Rạp (Cinemas):              ${cinemaMap.size}`);
+  console.log(`   - Phòng chiếu (Auditoriums):  ${auditoriumMap.size}`);
+  console.log(`   - Thể loại (Genres):          ${genreMap.size}`);
+  console.log(`   - Nhân vật (Persons):         ${personMap.size}`);
+  console.log(`   - Phim (Movies):              ${movieMap.size}`);
+  console.log(`   - Suất chiếu (Showtimes):     ${showtimeSuccessCount}`);
   console.log('═══════════════════════════════════════════════════════════════');
 }
 

@@ -1,5 +1,5 @@
 /**
- * index.js - Pipeline Crawler & Chuẩn hoá Dữ liệu Galaxy Cinema
+ * index.js - Pipeline Crawler & Chuẩn hoá Dữ liệu Galaxy Cinema (Bao gồm Diễn viên, Đạo diễn, Thể loại)
  * Xuất dữ liệu tương thích 100% với CineHub Prisma Schema v3
  */
 
@@ -18,12 +18,15 @@ const {
   fetchSessions, 
   fetchComingMovies, 
   fetchImaxMovies, 
-  fetchPromotions 
+  fetchPromotions,
+  fetchMovieDetail,
+  getBuildId
 } = require('./fetcher');
 
 const { 
   toSlug, 
   normalizeText, 
+  cleanSynopsis,
   extractProvince, 
   extractWard, 
   mapAgeRating, 
@@ -50,21 +53,24 @@ async function crawlAndNormalize() {
     sessionsData,
     comingMoviesData,
     imaxMoviesData,
-    promotionsData
+    promotionsData,
+    buildId
   ] = await Promise.all([
     fetchCinemas(),
     fetchSessions(),
     fetchComingMovies(),
     fetchImaxMovies(),
-    fetchPromotions()
+    fetchPromotions(),
+    getBuildId()
   ]);
 
   console.log(`✅ Đã nhận:`);
-  console.log(`   - Rạp (Cinemas API): ${cinemasData.length} rạp`);
-  console.log(`   - Suất chiếu (Sessions API): ${sessionsData.length} suất`);
-  console.log(`   - Phim sắp chiếu (Coming Soon): ${comingMoviesData.length} phim`);
-  console.log(`   - Phim IMAX: ${imaxMoviesData.length} phim`);
-  console.log(`   - Khuyến mãi (Promotions): ${promotionsData.length} banner`);
+  console.log(`   - Rạp (Cinemas API):          ${cinemasData.length} rạp`);
+  console.log(`   - Suất chiếu (Sessions API):  ${sessionsData.length} suất`);
+  console.log(`   - Phim sắp chiếu (Coming):    ${comingMoviesData.length} phim`);
+  console.log(`   - Phim IMAX:                  ${imaxMoviesData.length} phim`);
+  console.log(`   - Khuyến mãi (Promotions):     ${promotionsData.length} banner`);
+  console.log(`   - Next.js Build ID:           ${buildId}`);
 
   // 2. Khởi tạo cấu trúc dữ liệu theo Schema v3
   const DB = {
@@ -79,7 +85,11 @@ async function crawlAndNormalize() {
     Wards: new Map(),
     Cinemas: new Map(),
     Auditoriums: new Map(),
+    Genres: new Map(),
+    Persons: new Map(),
     Movies: new Map(),
+    MovieGenres: [],
+    MovieCredits: [],
     MovieSources: new Map(),
     Showtimes: new Map(),
     Promotions: new Map()
@@ -95,13 +105,12 @@ async function crawlAndNormalize() {
     if (c.slug) cinemaDetailMap.set(c.slug, c);
   });
 
-  // 3. Xử lý danh sách Rạp từ API Cinemas trước
+  // 3. Xử lý danh sách Rạp từ API Cinemas
   cinemasData.forEach(rawCinema => {
     const cinemaCode = String(rawCinema.code || rawCinema.siteId || rawCinema.id);
     const provInfo = extractProvince(rawCinema.address);
     const wardName = extractWard(rawCinema.address);
 
-    // Chuẩn hoá Tỉnh/Thành
     if (!DB.Provinces.has(provInfo.code)) {
       DB.Provinces.set(provInfo.code, {
         code: provInfo.code,
@@ -110,7 +119,6 @@ async function crawlAndNormalize() {
       });
     }
 
-    // Chuẩn hoá Phường/Xã
     if (wardName) {
       const wardKey = `${provInfo.code}_${wardName}`;
       if (!DB.Wards.has(wardKey)) {
@@ -148,11 +156,10 @@ async function crawlAndNormalize() {
     }
   });
 
-  // 4. Duyệt qua các suất chiếu để chuẩn hoá Rạp, Phòng chiếu, Phim, Suất chiếu
+  // 4. Gom danh sách phim & suất chiếu
   console.log(`🔄 Đang chuẩn hoá ${sessionsData.length} suất chiếu và phòng chiếu...`);
-
-  // Track trùng giờ chiếu trên cùng 1 phòng chiếu để tránh xung đột @@unique([auditoriumId, startTime])
   const auditoriumScheduleTrack = new Set();
+  const rawMovieMap = new Map();
 
   sessionsData.forEach(session => {
     const rawCinema = session.cinema || {};
@@ -160,6 +167,11 @@ async function crawlAndNormalize() {
     const cinemaCode = String(rawCinema.code || rawCinema.id);
 
     if (!cinemaCode || !rawMovie.id) return;
+
+    // Lưu raw movie để fetch detail sau
+    if (!rawMovieMap.has(String(rawMovie.id))) {
+      rawMovieMap.set(String(rawMovie.id), { ...rawMovie, isNowShowing: true });
+    }
 
     // --- RẠP ---
     const provInfo = extractProvince(rawCinema.address);
@@ -230,50 +242,7 @@ async function crawlAndNormalize() {
       });
     }
 
-    // --- PHIM (Movie & MovieSource) ---
-    const movieKey = String(rawMovie.id);
-    const movieSlug = rawMovie.slug || toSlug(rawMovie.name);
-
-    if (!DB.Movies.has(movieKey)) {
-      DB.Movies.set(movieKey, {
-        externalId: movieKey,
-        slug: movieSlug,
-        title: rawMovie.name,
-        titleNormalized: normalizeText(rawMovie.name),
-        originalTitle: null,
-        synopsis: null,
-        durationMin: rawMovie.duration ? parseInt(rawMovie.duration, 10) : null,
-        releaseDate: rawMovie.startDate ? moment(rawMovie.startDate).format('YYYY-MM-DD') : null,
-        endDate: rawMovie.endDate ? moment(rawMovie.endDate).format('YYYY-MM-DD') : null,
-        releaseYear: rawMovie.startDate ? moment(rawMovie.startDate).year() : null,
-        ageRating: mapAgeRating(rawMovie.age),
-        status: 'NOW_SHOWING',
-        posterUrl: rawMovie.imagePortrait || rawMovie.imageLandscape || null,
-        backdropUrl: rawMovie.imageLandscape || null,
-        trailerUrl: rawMovie.trailer || null,
-        language: 'Tiếng Việt',
-        country: null,
-        ratingAvg: 0,
-        ratingCount: 0,
-        mongoMetaId: null
-      });
-
-      DB.MovieSources.set(movieKey, {
-        movieExternalId: movieKey,
-        chainCode: CHAIN_CODE,
-        externalId: movieKey,
-        sourceSlug: rawMovie.slug,
-        url: movieSlug ? `https://www.galaxycine.vn/dat-ve/${movieSlug}` : null,
-        sourceScore: typeof rawMovie.rate === 'number' ? rawMovie.rate : (rawMovie.rate ? parseFloat(rawMovie.rate) : null),
-        sourceScoreScale: 10,
-        sourceVotes: rawMovie.totalVotes || 0,
-        lastSyncedAt: syncTimestamp,
-        lastSeenAt: syncTimestamp
-      });
-    }
-
     // --- SUẤT CHIẾU (Showtime) ---
-    // Galaxy API trả ngày showDate (YYYY-MM-DD) và giờ showTime (HH:mm) theo GMT+7
     const localStartStr = `${session.showDate}T${session.showTime}:00+07:00`;
     const startMoment = moment(localStartStr);
     const startTimeUTC = startMoment.utc().toISOString();
@@ -288,7 +257,7 @@ async function crawlAndNormalize() {
       DB.Showtimes.set(dedupKey, {
         externalId: session.id ? String(session.id) : null,
         cinemaExternalId: cinemaCode,
-        movieExternalId: movieKey,
+        movieExternalId: String(rawMovie.id),
         auditoriumName: screenName,
         dedupKey: dedupKey,
         startTime: startTimeUTC,
@@ -311,55 +280,162 @@ async function crawlAndNormalize() {
     }
   });
 
-  // 5. Bổ sung phim Sắp Chiếu (Coming Soon) & IMAX Movies
-  console.log('🔄 Đang bổ sung phim sắp chiếu & phim IMAX...');
-  const additionalMovies = [...comingMoviesData, ...imaxMoviesData];
-
-  additionalMovies.forEach(rawMovie => {
+  // Gom thêm phim sắp chiếu & IMAX
+  [...comingMoviesData, ...imaxMoviesData].forEach(rawMovie => {
     if (!rawMovie || !rawMovie.id) return;
-    const movieKey = String(rawMovie.id);
-    const movieSlug = rawMovie.slug || toSlug(rawMovie.name);
-
-    if (!DB.Movies.has(movieKey)) {
-      const isComing = rawMovie.startDate && moment(rawMovie.startDate).isAfter(moment());
-
-      DB.Movies.set(movieKey, {
-        externalId: movieKey,
-        slug: movieSlug,
-        title: rawMovie.name,
-        titleNormalized: normalizeText(rawMovie.name),
-        originalTitle: null,
-        synopsis: null,
-        durationMin: rawMovie.duration ? parseInt(rawMovie.duration, 10) : null,
-        releaseDate: rawMovie.startDate ? moment(rawMovie.startDate).format('YYYY-MM-DD') : null,
-        endDate: rawMovie.endDate ? moment(rawMovie.endDate).format('YYYY-MM-DD') : null,
-        releaseYear: rawMovie.startDate ? moment(rawMovie.startDate).year() : null,
-        ageRating: mapAgeRating(rawMovie.age),
-        status: isComing ? 'COMING_SOON' : 'NOW_SHOWING',
-        posterUrl: rawMovie.imagePortrait || rawMovie.imageLandscape || null,
-        backdropUrl: rawMovie.imageLandscape || null,
-        trailerUrl: rawMovie.trailer || null,
-        language: 'Tiếng Việt',
-        country: null,
-        ratingAvg: 0,
-        ratingCount: 0,
-        mongoMetaId: null
-      });
-
-      DB.MovieSources.set(movieKey, {
-        movieExternalId: movieKey,
-        chainCode: CHAIN_CODE,
-        externalId: movieKey,
-        sourceSlug: rawMovie.slug,
-        url: movieSlug ? `https://www.galaxycine.vn/dat-ve/${movieSlug}` : null,
-        sourceScore: typeof rawMovie.rate === 'number' ? rawMovie.rate : (rawMovie.rate ? parseFloat(rawMovie.rate) : null),
-        sourceScoreScale: 10,
-        sourceVotes: rawMovie.totalVotes || 0,
-        lastSyncedAt: syncTimestamp,
-        lastSeenAt: syncTimestamp
-      });
+    const key = String(rawMovie.id);
+    if (!rawMovieMap.has(key)) {
+      rawMovieMap.set(key, { ...rawMovie, isNowShowing: false });
     }
   });
+
+  // 5. Cào Chi Tiết Phim: Đạo diễn, Diễn viên, Thể loại, Quốc gia, Tóm tắt
+  console.log(`🎬 Đang tải chi tiết cho ${rawMovieMap.size} bộ phim từ Galaxy Next.js data...`);
+  const movieCreditTrack = new Set();
+  const movieGenreTrack = new Set();
+
+  for (const [movieKey, rawMovie] of rawMovieMap.entries()) {
+    const movieSlug = rawMovie.slug || toSlug(rawMovie.name);
+    
+    // Tải chi tiết từ Next.js data route
+    const detail = movieSlug ? await fetchMovieDetail(movieSlug, buildId) : null;
+
+    const title = detail?.name || rawMovie.name;
+    const synopsis = cleanSynopsis(detail?.description) || null;
+    const country = detail?.country || null;
+    const trailerUrl = detail?.trailer || rawMovie.trailer || null;
+    const posterUrl = detail?.imagePortrait || rawMovie.imagePortrait || rawMovie.imageLandscape || null;
+    const backdropUrl = detail?.imageLandscape || rawMovie.imageLandscape || null;
+    const durationMin = (detail?.duration || rawMovie.duration) ? parseInt(detail?.duration || rawMovie.duration, 10) : null;
+    const releaseDate = (detail?.startDate || rawMovie.startDate) ? moment(detail?.startDate || rawMovie.startDate).format('YYYY-MM-DD') : null;
+    const endDate = (detail?.endDate || rawMovie.endDate) ? moment(detail?.endDate || rawMovie.endDate).format('YYYY-MM-DD') : null;
+    const releaseYear = releaseDate ? moment(releaseDate).year() : null;
+    const ageRating = mapAgeRating(detail?.age || rawMovie.age);
+
+    const isComing = releaseDate && moment(releaseDate).isAfter(moment());
+    const movieStatus = rawMovie.isNowShowing ? 'NOW_SHOWING' : (isComing ? 'COMING_SOON' : 'NOW_SHOWING');
+
+    // Lưu Movie
+    DB.Movies.set(movieKey, {
+      externalId: movieKey,
+      slug: movieSlug,
+      title: title,
+      titleNormalized: normalizeText(title),
+      originalTitle: null,
+      synopsis: synopsis,
+      durationMin: durationMin,
+      releaseDate: releaseDate,
+      endDate: endDate,
+      releaseYear: releaseYear,
+      ageRating: ageRating,
+      status: movieStatus,
+      posterUrl: posterUrl,
+      backdropUrl: backdropUrl,
+      trailerUrl: trailerUrl,
+      language: 'Tiếng Việt',
+      country: country,
+      ratingAvg: 0,
+      ratingCount: 0,
+      mongoMetaId: null
+    });
+
+    // Lưu MovieSource
+    DB.MovieSources.set(movieKey, {
+      movieExternalId: movieKey,
+      chainCode: CHAIN_CODE,
+      externalId: movieKey,
+      sourceSlug: movieSlug,
+      url: movieSlug ? `https://www.galaxycine.vn/dat-ve/${movieSlug}` : null,
+      sourceScore: typeof rawMovie.rate === 'number' ? rawMovie.rate : (rawMovie.rate ? parseFloat(rawMovie.rate) : (detail?.rate || null)),
+      sourceScoreScale: 10,
+      sourceVotes: rawMovie.totalVotes || detail?.totalVotes || 0,
+      lastSyncedAt: syncTimestamp,
+      lastSeenAt: syncTimestamp
+    });
+
+    // Xử lý Thể loại (Genre & MovieGenre)
+    if (detail?.categories && Array.isArray(detail.categories)) {
+      detail.categories.forEach(cat => {
+        if (!cat || !cat.name) return;
+        const genreSlug = cat.slug || toSlug(cat.name);
+        if (!DB.Genres.has(genreSlug)) {
+          DB.Genres.set(genreSlug, {
+            slug: genreSlug,
+            name: cat.name.trim()
+          });
+        }
+
+        const mgKey = `${movieKey}_${genreSlug}`;
+        if (!movieGenreTrack.has(mgKey)) {
+          movieGenreTrack.add(mgKey);
+          DB.MovieGenres.push({
+            movieExternalId: movieKey,
+            genreSlug: genreSlug
+          });
+        }
+      });
+    }
+
+    // Xử lý Đạo diễn (Person & MovieCredit - DIRECTOR)
+    if (detail?.directors && Array.isArray(detail.directors)) {
+      detail.directors.forEach((dir, idx) => {
+        if (!dir || !dir.name || dir.name.trim() === 'Đang cập nhật') return;
+        const dirName = dir.name.trim();
+        const normName = normalizeText(dirName);
+        if (!normName) return;
+
+        if (!DB.Persons.has(normName)) {
+          DB.Persons.set(normName, {
+            fullName: dirName,
+            nameNormalized: normName,
+            photoUrl: dir.imagePortrait || dir.imageLandscape || null
+          });
+        }
+
+        const creditKey = `${movieKey}_${normName}_DIRECTOR`;
+        if (!movieCreditTrack.has(creditKey)) {
+          movieCreditTrack.add(creditKey);
+          DB.MovieCredits.push({
+            movieExternalId: movieKey,
+            personNameNormalized: normName,
+            role: 'DIRECTOR',
+            billingOrder: idx,
+            characterName: null
+          });
+        }
+      });
+    }
+
+    // Xử lý Diễn viên (Person & MovieCredit - ACTOR)
+    if (detail?.actors && Array.isArray(detail.actors)) {
+      detail.actors.forEach((act, idx) => {
+        if (!act || !act.name || act.name.trim() === 'Đang cập nhật') return;
+        const actName = act.name.trim();
+        const normName = normalizeText(actName);
+        if (!normName) return;
+
+        if (!DB.Persons.has(normName)) {
+          DB.Persons.set(normName, {
+            fullName: actName,
+            nameNormalized: normName,
+            photoUrl: act.imagePortrait || act.imageLandscape || null
+          });
+        }
+
+        const creditKey = `${movieKey}_${normName}_ACTOR`;
+        if (!movieCreditTrack.has(creditKey)) {
+          movieCreditTrack.add(creditKey);
+          DB.MovieCredits.push({
+            movieExternalId: movieKey,
+            personNameNormalized: normName,
+            role: 'ACTOR',
+            billingOrder: idx,
+            characterName: null
+          });
+        }
+      });
+    }
+  }
 
   // 6. Xử lý Khuyến mãi (Promotions)
   console.log('🔄 Đang chuẩn hoá chương trình khuyến mãi...');
@@ -383,19 +459,23 @@ async function crawlAndNormalize() {
     }
   });
 
-  // 7. Tạo Payload JSON hoàn chỉnh
+  // 7. Tạo Payload JSON hoàn chỉnh theo đúng Prisma Schema v3
   const outputData = {
     meta: {
       generatedAt: syncTimestamp,
       chain: CHAIN_CODE,
-      source: 'Galaxy Cinema API v2 Mobile',
+      source: 'Galaxy Cinema API v2 Mobile + Next.js Data',
       executionTimeMs: Date.now() - startTime,
       counts: {
         provinces: DB.Provinces.size,
         wards: DB.Wards.size,
         cinemas: DB.Cinemas.size,
         auditoriums: DB.Auditoriums.size,
+        genres: DB.Genres.size,
+        persons: DB.Persons.size,
         movies: DB.Movies.size,
+        movieGenres: DB.MovieGenres.length,
+        movieCredits: DB.MovieCredits.length,
         movieSources: DB.MovieSources.size,
         showtimes: DB.Showtimes.size,
         promotions: DB.Promotions.size
@@ -406,7 +486,11 @@ async function crawlAndNormalize() {
     wards: Array.from(DB.Wards.values()),
     cinemas: Array.from(DB.Cinemas.values()),
     auditoriums: Array.from(DB.Auditoriums.values()),
+    genres: Array.from(DB.Genres.values()),
+    persons: Array.from(DB.Persons.values()),
     movies: Array.from(DB.Movies.values()),
+    movieGenres: DB.MovieGenres,
+    movieCredits: DB.MovieCredits,
     movieSources: Array.from(DB.MovieSources.values()),
     showtimes: Array.from(DB.Showtimes.values()),
     promotions: Array.from(DB.Promotions.values())
@@ -423,7 +507,11 @@ async function crawlAndNormalize() {
   console.log(`   - Phường / Xã (Wards):        ${outputData.meta.counts.wards}`);
   console.log(`   - Rạp (Cinemas):              ${outputData.meta.counts.cinemas}`);
   console.log(`   - Phòng chiếu (Auditoriums):  ${outputData.meta.counts.auditoriums}`);
+  console.log(`   - Thể loại (Genres):          ${outputData.meta.counts.genres}`);
+  console.log(`   - Đạo diễn / Diễn viên:       ${outputData.meta.counts.persons}`);
   console.log(`   - Phim (Movies):              ${outputData.meta.counts.movies}`);
+  console.log(`   - Phim - Thể loại quan hệ:    ${outputData.meta.counts.movieGenres}`);
+  console.log(`   - Phim - Nhân vật quan hệ:    ${outputData.meta.counts.movieCredits}`);
   console.log(`   - Nguồn phim (MovieSources):  ${outputData.meta.counts.movieSources}`);
   console.log(`   - Suất chiếu (Showtimes):     ${outputData.meta.counts.showtimes}`);
   console.log(`   - Khuyến mãi (Promotions):    ${outputData.meta.counts.promotions}`);
