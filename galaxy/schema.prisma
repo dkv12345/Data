@@ -1,0 +1,986 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// CineHub – prisma/schema.prisma (v3)
+// MySQL 8.0.16+ | Prisma >= 5.18 (uuid(7)) | 39 model, 8 nhóm
+//
+// v3 = v2 (đã áp dụng review mục 5) + Google Auth + Ward + dữ liệu crawl Galaxy.
+// CHANGELOG v3 so với v2 (mã G* = phát hiện từ dữ liệu crawl Galaxy Cinema):
+//   G1  Nguồn crawl là Galaxy Cinema (CinemaChain.code = GALAXY)
+//   G2  Cinema: externalId = cinema.code của API (ổn định); + slug, sourceCityId,
+//       sourceUrl, imageUrl, thumbnailUrl, galleryUrls, sortOrder, lastSyncedAt
+//   G3  Auditorium: name = screenName của API; + tier (RoomTier), isLayoutMock
+//   G4  Showtime: externalId = "{cinemaCode}-{sessionNo}"; + formatRaw, versionCode,
+//       kind (REGULAR/ENCORE/LIVE), captionMode (SUBTITLED/DUBBED),
+//       providerTotalSeats, providerBookedSeats
+//   G5  ScreenFormat + DOLBY, LED; PriceRule + roomTier (phòng VIP giá khác)
+//   G6  Movie.durationMin nullable (phim sắp chiếu chưa có thời lượng);
+//       Movie.endDate (endDate của API); ageRating map từ movie.age
+//   G7  MovieSource: + sourceSlug, sourceScore/sourceScoreScale/sourceVotes
+//       (điểm 10 thang của nguồn tách khỏi ratingAvg 5 thang của CineHub)
+//   G8  Promotion: startsAt/endsAt nullable; + chainId, dedupKey
+//   G9  Ward thay District (địa chỉ Galaxy có "Phường …", không có quận)
+//   Auth: AuthProvider, User.googleId, passwordHash nullable
+//
+// LƯU Ý MySQL: CHECK không dùng được trên cột có FK action CASCADE/SET NULL
+// (lỗi 3823). Vì vậy 3 relation có CHECK đi kèm được đặt onUpdate: Restrict
+// (BookingSeat.showtimeSeat, Payment.booking, ShowtimeSeat.heldByBooking).
+// ═══════════════════════════════════════════════════════════════════════════
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ═══════════ ENUMS ═══════════
+enum AuthProvider {
+  LOCAL
+  GOOGLE
+}
+
+enum UserRole {
+  CUSTOMER
+  STAFF
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  LOCKED
+  DELETED
+}
+
+enum MovieStatus {
+  COMING_SOON
+  NOW_SHOWING
+  ENDED
+}
+
+enum AgeRating {
+  P
+  K
+  T13
+  T16
+  T18
+  C // cấm phổ biến
+}
+
+enum ScreenFormat {
+  TWO_D
+  THREE_D
+  IMAX
+  FOUR_DX
+  SCREENX
+  DOLBY // Dolby Vision + Atmos
+  LED // Onyx LED
+}
+
+enum RoomTier {
+  STANDARD
+  VIP // VIP – AQUALIS / LAURUS / LAGOM / ROMANTICO / X-HARBOR
+  KIDS // Cine de Kids
+  PREMIUM // Infinity Vision, Dolby, IMAX...
+}
+
+enum ShowtimeKind {
+  REGULAR
+  ENCORE // version "rebroadcast" – Phát Encore
+  LIVE // version "live" – Phát Delayed Live
+}
+
+enum CaptionMode {
+  SUBTITLED // caption = sub  (Phụ đề)
+  DUBBED // caption = voice (Lồng tiếng)
+}
+
+enum CreditRole {
+  DIRECTOR
+  ACTOR
+}
+
+enum ShowtimeStatus {
+  SCHEDULED // đã crawl, chưa mở bán
+  OPEN // đang mở bán
+  SOLD_OUT
+  CANCELLED
+  FINISHED
+}
+
+enum SeatState {
+  AVAILABLE
+  HELD
+  SOLD
+  BLOCKED
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  EXPIRED
+  PARTIALLY_REFUNDED
+  REFUNDED
+}
+
+enum PaymentProvider {
+  VNPAY
+  ZALOPAY
+  MOMO // ngoài phạm vi đồ án, giữ để mở rộng
+}
+
+enum PaymentStatus {
+  INITIATED
+  PENDING
+  SUCCESS
+  FAILED
+  CANCELLED
+  REFUNDED
+}
+
+enum RefundStatus {
+  REQUESTED
+  DONE
+  FAILED
+}
+
+enum TicketStatus {
+  VALID
+  USED
+  VOID
+}
+
+enum VoucherType {
+  PERCENT
+  FIXED
+}
+
+enum RedemptionStatus {
+  RESERVED // đã chiếm lượt khi áp voucher
+  REDEEMED // thanh toán thành công
+  RELEASED // đơn hết hạn/huỷ, trả lượt
+}
+
+enum ConcessionCategory {
+  COMBO
+  POPCORN
+  DRINK
+  SNACK
+}
+
+enum NotificationType {
+  TICKET_EMAIL
+  MOVIE_RELEASE
+  NEW_SHOWTIME
+  BOOKING_CONFIRMED
+  SHOWTIME_REMINDER
+}
+
+enum InboxType {
+  MOVIE_RELEASE
+  NEW_SHOWTIME
+  BOOKING_CONFIRMED
+  SHOWTIME_REMINDER
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+enum SeatDataSource {
+  MOCK // ghế do CineHub mô phỏng
+  PROVIDER // dự phòng: dữ liệu ghế thật từ nhà cung cấp sau này
+}
+
+enum PriceSource {
+  CRAWLED
+  DEFAULT // lấy từ PriceRule
+  MANUAL
+}
+
+enum DayType {
+  WEEKDAY
+  WEEKEND
+  HOLIDAY
+}
+
+enum OutboxStatus {
+  PENDING
+  PROCESSED
+  FAILED
+}
+
+// ═══════════ IDENTITY ═══════════
+model User {
+  id              String       @id @default(uuid(7)) @db.Char(36)
+  email           String       @unique @db.VarChar(255) // khi xoá: anonymize deleted+{id}@cinehub.invalid
+  authProvider    AuthProvider @default(LOCAL)
+  googleId        String?      @unique @db.VarChar(100) // sub của Google OAuth
+  passwordHash    String?      @db.VarChar(255) // NULL với tài khoản chỉ đăng nhập Google
+  fullName        String       @db.VarChar(120)
+  phone           String?      @db.VarChar(20)
+  avatarUrl       String?      @db.VarChar(500)
+  role            UserRole     @default(CUSTOMER)
+  status          UserStatus   @default(ACTIVE)
+  cinemaId        String?      @db.Char(36) // chỉ dùng cho STAFF: rạp được phép quét vé
+  emailVerifiedAt DateTime?
+  lastLoginAt     DateTime?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  deletedAt       DateTime?
+
+  cinema            Cinema?                  @relation("CinemaStaff", fields: [cinemaId], references: [id])
+  refreshTokens     RefreshToken[]
+  resetTokens       PasswordResetToken[]
+  emailVerifyTokens EmailVerificationToken[]
+  bookings          Booking[]
+  favorites         Favorite[]
+  subscriptions     MovieSubscription[]
+  redemptions       VoucherRedemption[]
+  notificationLogs  NotificationLog[]
+  notifications     Notification[]
+  checkedTickets    Ticket[]                 @relation("TicketCheckin")
+
+  @@index([role, status])
+  @@index([cinemaId])
+  @@map("users")
+}
+
+model RefreshToken {
+  id           String    @id @default(uuid(7)) @db.Char(36)
+  userId       String    @db.Char(36)
+  familyId     String    @db.Char(36) // cả chuỗi xoay vòng chia sẻ 1 familyId
+  tokenHash    String    @unique @db.Char(64) // SHA-256
+  replacedById String?   @db.Char(36) // token mới thay thế (rotation)
+  userAgent    String?   @db.VarChar(255)
+  ip           String?   @db.VarChar(45)
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  createdAt    DateTime  @default(now())
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid(7)) @db.Char(36)
+  userId    String    @db.Char(36)
+  tokenHash String    @unique @db.Char(64)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+model EmailVerificationToken {
+  id        String    @id @default(uuid(7)) @db.Char(36)
+  userId    String    @db.Char(36)
+  tokenHash String    @unique @db.Char(64)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("email_verification_tokens")
+}
+
+// ═══════════ CATALOG ═══════════
+model CinemaChain {
+  id         String  @id @default(uuid(7)) @db.Char(36)
+  code       String  @unique @db.VarChar(20) // GALAXY, CGV, LOTTE, BHD
+  name       String  @db.VarChar(100)
+  logoUrl    String? @db.VarChar(500)
+  websiteUrl String? @db.VarChar(500)
+  isActive   Boolean @default(true)
+
+  cinemas      Cinema[]
+  movieSources MovieSource[]
+  concessions  Concession[]
+  priceRules   PriceRule[]
+  promotions   Promotion[]
+
+  @@map("cinema_chains")
+}
+
+model Province {
+  id             String @id @default(uuid(7)) @db.Char(36)
+  code           String @unique @db.VarChar(20) // HCM, HN, DN... (một mã duy nhất cho mỗi tỉnh/thành)
+  name           String @db.VarChar(100) // tên chuẩn: "TP. Hồ Chí Minh"
+  nameNormalized String @unique @db.VarChar(100) // bỏ dấu, bỏ "TP."/"Tỉnh", lowercase – khớp "TP.HCM"/"TP. HCM"
+
+  wards   Ward[]
+  cinemas Cinema[]
+
+  @@map("provinces")
+}
+
+model Ward {
+  id         String @id @default(uuid(7)) @db.Char(36)
+  provinceId String @db.Char(36)
+  name       String @db.VarChar(100) // "Phường Thông Tây Hội" – tách từ địa chỉ rạp
+
+  province Province @relation(fields: [provinceId], references: [id])
+  cinemas  Cinema[]
+
+  @@unique([provinceId, name])
+  @@map("wards")
+}
+
+model Cinema {
+  id           String    @id @default(uuid(7)) @db.Char(36)
+  chainId      String    @db.Char(36)
+  externalId   String    @db.VarChar(100) // Galaxy: cinema.code ("1001", "0000001005")
+  slug         String?   @db.VarChar(120) // Galaxy: "galaxy-quang-trung" (đường dẫn /rap-gia-ve/{slug})
+  name         String    @db.VarChar(200)
+  address      String    @db.VarChar(500)
+  provinceId   String    @db.Char(36)
+  wardId       String?   @db.Char(36)
+  latitude     Decimal?  @db.Decimal(9, 6)
+  longitude    Decimal?  @db.Decimal(9, 6)
+  phone        String?   @db.VarChar(20) // chuẩn hoá: bỏ khoảng trắng ("1900 2224" → "19002224")
+  timezone     String    @default("Asia/Ho_Chi_Minh") @db.VarChar(50)
+  sourceCityId String?   @db.VarChar(100) // Galaxy: cityId (UUID) của nguồn, giữ để đối chiếu
+  sourceUrl    String?   @db.VarChar(500)
+  imageUrl     String?   @db.VarChar(500) // imageLandscape
+  thumbnailUrl String?   @db.VarChar(500) // imagePortrait
+  galleryUrls  Json? // imageUrls[] (3–5 ảnh)
+  sortOrder    Int       @default(99) // Galaxy: order (99 = chưa xếp)
+  isActive     Boolean   @default(true)
+  lastSyncedAt DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  chain       CinemaChain  @relation(fields: [chainId], references: [id])
+  province    Province     @relation(fields: [provinceId], references: [id])
+  ward        Ward?        @relation(fields: [wardId], references: [id])
+  auditoriums Auditorium[]
+  showtimes   Showtime[]
+  concessions Concession[]
+  staff       User[]       @relation("CinemaStaff")
+
+  @@unique([chainId, externalId])
+  @@unique([chainId, slug])
+  @@index([provinceId, isActive])
+  @@index([chainId, sortOrder])
+  @@map("cinemas")
+}
+
+model Auditorium {
+  id            String       @id @default(uuid(7)) @db.Char(36)
+  cinemaId      String       @db.Char(36)
+  name          String       @db.VarChar(50) // Galaxy: screenName ("RAP 5-DAISY", "IMAX with Laser", "VIP – LAURUS")
+  tier          RoomTier     @default(STANDARD)
+  defaultFormat ScreenFormat @default(TWO_D)
+  totalSeats    Int          @default(0) // số bản ghi Seat
+  totalCapacity Int          @default(0) // số chỗ ngồi thực (Sweetbox = 2)
+  layoutCode    String?      @db.VarChar(30) // mã mẫu sơ đồ ghế do CineHub sinh
+  isLayoutMock  Boolean      @default(true) // true = sơ đồ ghế do CineHub mô phỏng
+  isActive      Boolean      @default(true)
+
+  cinema    Cinema     @relation(fields: [cinemaId], references: [id], onDelete: Cascade)
+  seats     Seat[]
+  showtimes Showtime[]
+
+  @@unique([cinemaId, name])
+  @@map("auditoriums")
+}
+
+model TicketType {
+  id        String  @id @default(uuid(7)) @db.Char(36)
+  code      String  @unique @db.VarChar(20) // ADULT, STUDENT, CHILD, MEMBER
+  name      String  @db.VarChar(60)
+  sortOrder Int     @default(0)
+  isActive  Boolean @default(true)
+
+  prices       ShowtimePrice[]
+  priceRules   PriceRule[]
+  bookingSeats BookingSeat[]
+
+  @@map("ticket_types")
+}
+
+model SeatType {
+  id       String  @id @default(uuid(7)) @db.Char(36)
+  code     String  @unique @db.VarChar(20) // STANDARD, VIP, SWEETBOX
+  name     String  @db.VarChar(50)
+  colorHex String? @db.VarChar(9)
+  capacity Int     @default(1) // Sweetbox = 2 người
+
+  seats          Seat[]
+  priceRules     PriceRule[]
+  showtimePrices ShowtimePrice[]
+
+  @@map("seat_types")
+}
+
+model Seat {
+  id           String  @id @default(uuid(7)) @db.Char(36)
+  auditoriumId String  @db.Char(36)
+  seatTypeId   String  @db.Char(36)
+  rowLabel     String  @db.VarChar(3) // A, B, ... AA
+  colNumber    Int
+  label        String  @db.VarChar(8) // A5
+  posX         Int // toạ độ vẽ SVG
+  posY         Int
+  colSpan      Int     @default(1)
+  isActive     Boolean @default(true)
+
+  auditorium    Auditorium     @relation(fields: [auditoriumId], references: [id], onDelete: Cascade)
+  seatType      SeatType       @relation(fields: [seatTypeId], references: [id])
+  showtimeSeats ShowtimeSeat[]
+
+  @@unique([auditoriumId, rowLabel, colNumber])
+  @@map("seats")
+}
+
+model Genre {
+  id   String @id @default(uuid(7)) @db.Char(36)
+  slug String @unique @db.VarChar(60) // lang-man, hai, hoat-hinh, hanh-dong...
+  name String @db.VarChar(60)
+
+  movies MovieGenre[]
+
+  @@map("genres")
+}
+
+model Movie {
+  id              String      @id @default(uuid(7)) @db.Char(36)
+  slug            String      @unique @db.VarChar(200) // slug của nguồn (vd: trai-buon-nguoi); trùng thì thêm năm
+  title           String      @db.VarChar(255)
+  titleNormalized String      @db.VarChar(255) // bỏ dấu + lowercase, phục vụ gộp phim giữa các cụm
+  originalTitle   String?     @db.VarChar(255)
+  synopsis        String?     @db.Text
+  durationMin     Int? // NULL với phim sắp chiếu chưa công bố thời lượng
+  releaseDate     DateTime?   @db.Date // startDate của nguồn
+  endDate         DateTime?   @db.Date // endDate của nguồn (hết lịch chiếu dự kiến)
+  releaseYear     Int?
+  ageRating       AgeRating? // map từ movie.age: 0→P, k→K, 13→T13, 16→T16, 18→T18
+  status          MovieStatus @default(COMING_SOON)
+  posterUrl       String?     @db.VarChar(500)
+  backdropUrl     String?     @db.VarChar(500)
+  trailerUrl      String?     @db.VarChar(500)
+  language        String?     @db.VarChar(50)
+  country         String?     @db.VarChar(60)
+  ratingAvg       Decimal     @default(0) @db.Decimal(3, 2) // CHỈ từ review CineHub (thang 5), không lấy điểm nguồn
+  ratingCount     Int         @default(0)
+  mongoMetaId     String?     @db.VarChar(24) // ObjectId của movie_metadata
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  deletedAt       DateTime?
+
+  genres        MovieGenre[]
+  credits       MovieCredit[]
+  sources       MovieSource[]
+  showtimes     Showtime[]
+  favorites     Favorite[]
+  subscriptions MovieSubscription[]
+
+  @@index([status, releaseDate])
+  @@index([titleNormalized, releaseYear])
+  @@index([title])
+  @@map("movies")
+}
+
+model MovieGenre {
+  movieId String @db.Char(36)
+  genreId String @db.Char(36)
+
+  movie Movie @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  genre Genre @relation(fields: [genreId], references: [id])
+
+  @@id([movieId, genreId])
+  @@index([genreId])
+  @@map("movie_genres")
+}
+
+model Person {
+  id             String  @id @default(uuid(7)) @db.Char(36)
+  fullName       String  @db.VarChar(150)
+  nameNormalized String  @unique @db.VarChar(150) // khoá upsert khi crawl; bỏ qua giá trị "Đang cập nhật"
+  photoUrl       String? @db.VarChar(500)
+
+  credits MovieCredit[]
+
+  @@index([fullName])
+  @@map("persons")
+}
+
+model MovieCredit {
+  id            String     @id @default(uuid(7)) @db.Char(36)
+  movieId       String     @db.Char(36)
+  personId      String     @db.Char(36)
+  role          CreditRole
+  billingOrder  Int        @default(0)
+  characterName String?    @db.VarChar(150)
+
+  movie  Movie  @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  person Person @relation(fields: [personId], references: [id])
+
+  @@unique([movieId, personId, role])
+  @@map("movie_credits")
+}
+
+model MovieSource {
+  id               String    @id @default(uuid(7)) @db.Char(36)
+  movieId          String    @db.Char(36)
+  chainId          String    @db.Char(36)
+  externalId       String    @db.VarChar(100) // Galaxy: movie.id (UUID)
+  sourceSlug       String?   @db.VarChar(200)
+  url              String?   @db.VarChar(500) // https://www.galaxycine.vn/dat-ve/{slug}/
+  sourceScore      Decimal?  @db.Decimal(4, 2) // điểm của nguồn (Galaxy: rate, thang 10)
+  sourceScoreScale Int       @default(10)
+  sourceVotes      Int? // Galaxy: totalVotes
+  lastSyncedAt     DateTime?
+  lastSeenAt       DateTime?
+
+  movie Movie       @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  chain CinemaChain @relation(fields: [chainId], references: [id])
+
+  @@unique([chainId, externalId])
+  @@index([movieId])
+  @@map("movie_sources")
+}
+
+// ═══════════ SCHEDULING ═══════════
+model Showtime {
+  id                  String         @id @default(uuid(7)) @db.Char(36)
+  movieId             String         @db.Char(36)
+  auditoriumId        String         @db.Char(36)
+  cinemaId            String         @db.Char(36) // denormalize từ Auditorium; bất biến
+  externalId          String?        @db.VarChar(100) // Galaxy: session.id = "{cinemaCode}-{sessionNo}"
+  // sha1(chain:cinema:movie:startTimeUTC:format) – KHÔNG chứa auditorium
+  dedupKey            String         @unique @db.Char(40)
+  startTime           DateTime // UTC (Galaxy: showDate + showTime giờ VN → UTC)
+  endTime             DateTime // startTime + durationMin (mặc định 120) + buffer quảng cáo
+  localDate           DateTime       @db.Date // ngày chiếu theo giờ Asia/Ho_Chi_Minh
+  format              ScreenFormat   @default(TWO_D)
+  formatRaw           String?        @db.VarChar(60) // Galaxy: movieFormat ("2D Phụ Đề", "VIP - AQUALIS 2D Phụ Đề")
+  versionCode         String?        @db.VarChar(30) // Galaxy: version ("2d", "laurus2d", "rebroadcast")
+  kind                ShowtimeKind   @default(REGULAR)
+  captionMode         CaptionMode    @default(SUBTITLED)
+  audioLanguage       String?        @db.VarChar(10) // vi, en, ko...
+  subtitleLanguage    String?        @db.VarChar(10)
+  status              ShowtimeStatus @default(SCHEDULED)
+  seatSource          SeatDataSource @default(MOCK)
+  providerTotalSeats  Int? // Galaxy: totalSeat (hiện luôn 0)
+  providerBookedSeats Int? // Galaxy: bookedSeat (hiện luôn 0)
+  lastSyncedAt        DateTime?
+  lastSeenAt          DateTime? // lần cuối crawl còn thấy suất này
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  movie      Movie           @relation(fields: [movieId], references: [id])
+  auditorium Auditorium      @relation(fields: [auditoriumId], references: [id])
+  cinema     Cinema          @relation(fields: [cinemaId], references: [id])
+  prices     ShowtimePrice[]
+  seats      ShowtimeSeat[]
+  bookings   Booking[]
+
+  @@unique([cinemaId, externalId])
+  @@unique([auditoriumId, startTime])
+  @@index([movieId, startTime])
+  @@index([cinemaId, localDate, movieId])
+  @@index([startTime, status])
+  @@map("showtimes")
+}
+
+model PriceRule {
+  id           String       @id @default(uuid(7)) @db.Char(36)
+  chainId      String       @db.Char(36)
+  format       ScreenFormat
+  roomTier     RoomTier     @default(STANDARD)
+  seatTypeId   String       @db.Char(36)
+  ticketTypeId String       @db.Char(36)
+  dayType      DayType      @default(WEEKDAY)
+  price        Int
+  isActive     Boolean      @default(true)
+
+  chain      CinemaChain @relation(fields: [chainId], references: [id])
+  seatType   SeatType    @relation(fields: [seatTypeId], references: [id])
+  ticketType TicketType  @relation(fields: [ticketTypeId], references: [id])
+
+  @@unique([chainId, format, roomTier, seatTypeId, ticketTypeId, dayType])
+  @@map("price_rules")
+}
+
+model ShowtimePrice {
+  id           String      @id @default(uuid(7)) @db.Char(36)
+  showtimeId   String      @db.Char(36)
+  seatTypeId   String      @db.Char(36)
+  ticketTypeId String      @db.Char(36)
+  price        Int
+  source       PriceSource @default(DEFAULT)
+
+  showtime   Showtime   @relation(fields: [showtimeId], references: [id], onDelete: Cascade)
+  seatType   SeatType   @relation(fields: [seatTypeId], references: [id])
+  ticketType TicketType @relation(fields: [ticketTypeId], references: [id])
+
+  @@unique([showtimeId, seatTypeId, ticketTypeId])
+  @@map("showtime_prices")
+}
+
+model ShowtimeSeat {
+  id              String    @id @default(uuid(7)) @db.Char(36)
+  showtimeId      String    @db.Char(36)
+  seatId          String    @db.Char(36)
+  status          SeatState @default(AVAILABLE)
+  heldByBookingId String?   @db.Char(36)
+  heldUntil       DateTime?
+  version         Int       @default(0) // optimistic lock: UPDATE ... WHERE version = ?
+  isSeeded        Boolean   @default(false) // true = ghế bán giả lập, không thuộc đơn nào
+  // LƯU Ý: updatedAt do Prisma Client gán; raw SQL phải tự set updatedAt = NOW(3)
+  updatedAt       DateTime  @updatedAt
+
+  showtime      Showtime      @relation(fields: [showtimeId], references: [id], onDelete: Cascade)
+  seat          Seat          @relation(fields: [seatId], references: [id])
+  heldByBooking Booking?      @relation("SeatHold", fields: [heldByBookingId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  bookingSeats  BookingSeat[]
+
+  @@unique([showtimeId, seatId])
+  @@index([showtimeId, status])
+  @@index([status, heldUntil])
+  @@index([heldByBookingId])
+  @@map("showtime_seats")
+}
+
+// ═══════════ COMMERCE ═══════════
+model Concession {
+  id          String             @id @default(uuid(7)) @db.Char(36)
+  chainId     String             @db.Char(36)
+  cinemaId    String?            @db.Char(36) // null = áp dụng cả cụm; service phải kiểm cinema thuộc chain
+  name        String             @db.VarChar(150)
+  description String?            @db.VarChar(500)
+  category    ConcessionCategory @default(COMBO)
+  imageUrl    String?            @db.VarChar(500)
+  price       Int
+  isActive    Boolean            @default(true)
+  sortOrder   Int                @default(0)
+
+  chain  CinemaChain         @relation(fields: [chainId], references: [id])
+  cinema Cinema?             @relation(fields: [cinemaId], references: [id])
+  items  BookingConcession[]
+
+  @@index([chainId, isActive, sortOrder])
+  @@map("concessions")
+}
+
+model Booking {
+  id             String        @id @default(uuid(7)) @db.Char(36)
+  code           String        @unique @db.VarChar(20) // CH + yymmdd + 6 ký tự
+  userId         String        @db.Char(36)
+  showtimeId     String        @db.Char(36)
+  status         BookingStatus @default(PENDING)
+  subtotalAmount Int           @default(0)
+  discountAmount Int           @default(0)
+  serviceFee     Int           @default(0)
+  totalAmount    Int           @default(0)
+  contactEmail   String        @db.VarChar(255)
+  contactPhone   String?       @db.VarChar(20)
+  expiresAt      DateTime
+  confirmedAt    DateTime?
+  cancelledAt    DateTime?
+  cancelReason   String?       @db.VarChar(255)
+  version        Int           @default(0)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  user        User                @relation(fields: [userId], references: [id])
+  showtime    Showtime            @relation(fields: [showtimeId], references: [id])
+  seats       BookingSeat[]
+  concessions BookingConcession[]
+  payments    Payment[]
+  tickets     Ticket[]
+  redemption  VoucherRedemption? // nguồn duy nhất cho voucher của đơn
+  heldSeats   ShowtimeSeat[]      @relation("SeatHold")
+
+  @@index([userId, createdAt])
+  @@index([status, expiresAt])
+  @@index([showtimeId, status])
+  @@map("bookings")
+}
+
+model BookingSeat {
+  id             String  @id @default(uuid(7)) @db.Char(36)
+  bookingId      String  @db.Char(36)
+  showtimeSeatId String  @db.Char(36)
+  seatLabel      String  @db.VarChar(8)
+  seatTypeCode   String  @db.VarChar(20)
+  ticketTypeId   String  @db.Char(36)
+  ticketTypeCode String  @db.VarChar(20)
+  price          Int
+  // = showtimeSeatId khi đơn còn hiệu lực, NULL khi nhả ghế.
+  // Chỉ được set/clear qua hàm releaseSeats()/lockSeats() duy nhất
+  activeLock     String? @unique @db.Char(36)
+
+  booking      Booking      @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  showtimeSeat ShowtimeSeat @relation(fields: [showtimeSeatId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  ticketType   TicketType   @relation(fields: [ticketTypeId], references: [id])
+  ticket       Ticket?
+
+  @@unique([bookingId, showtimeSeatId])
+  @@index([bookingId])
+  @@index([showtimeSeatId])
+  @@map("booking_seats")
+}
+
+model BookingConcession {
+  id           String @id @default(uuid(7)) @db.Char(36)
+  bookingId    String @db.Char(36)
+  concessionId String @db.Char(36)
+  nameSnapshot String @db.VarChar(150)
+  quantity     Int
+  unitPrice    Int
+
+  booking    Booking    @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  concession Concession @relation(fields: [concessionId], references: [id])
+
+  @@unique([bookingId, concessionId])
+  @@map("booking_concessions")
+}
+
+model Ticket {
+  id            String       @id @default(uuid(7)) @db.Char(36)
+  bookingId     String       @db.Char(36)
+  bookingSeatId String       @unique @db.Char(36)
+  // QR = ticketId + "." + HMAC_SHA256(secret, ticketId + qrVersion) rút gọn.
+  // Không lưu token; tăng qrVersion để thu hồi/làm mới QR.
+  qrVersion     Int          @default(1)
+  status        TicketStatus @default(VALID)
+  issuedAt      DateTime     @default(now())
+  usedAt        DateTime?
+  checkedInById String?      @db.Char(36)
+
+  booking     Booking     @relation(fields: [bookingId], references: [id])
+  bookingSeat BookingSeat @relation(fields: [bookingSeatId], references: [id])
+  checkedInBy User?       @relation("TicketCheckin", fields: [checkedInById], references: [id])
+
+  @@index([bookingId])
+  @@map("tickets")
+}
+
+// ═══════════ PAYMENT ═══════════
+model Payment {
+  id            String          @id @default(uuid(7)) @db.Char(36)
+  bookingId     String          @db.Char(36)
+  provider      PaymentProvider
+  status        PaymentStatus   @default(INITIATED)
+  amount        Int
+  currency      String          @default("VND") @db.Char(3)
+  txnRef        String          @unique @db.VarChar(64) // mã merchant gửi cổng thanh toán
+  providerTxnNo String?         @db.VarChar(100)
+  bankCode      String?         @db.VarChar(30)
+  failureCode   String?         @db.VarChar(50)
+  rawResponse   Json?
+  // = bookingId khi status IN (SUCCESS, REFUNDED), NULL còn lại -> tối đa 1 payment thành công/đơn
+  successLock   String?         @unique @db.Char(36)
+  paidAt        DateTime?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  booking Booking  @relation(fields: [bookingId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  refunds Refund[]
+
+  @@index([bookingId])
+  @@index([status, createdAt])
+  @@map("payments")
+}
+
+model PaymentWebhookEvent {
+  id             String          @id @default(uuid(7)) @db.Char(36)
+  provider       PaymentProvider
+  eventKey       String          @db.VarChar(120) // vd: vnp_TxnRef + vnp_TransactionNo
+  txnRef         String?         @db.VarChar(64)
+  payload        Json
+  signatureValid Boolean
+  processedAt    DateTime?
+  createdAt      DateTime        @default(now())
+
+  @@unique([provider, eventKey])
+  @@index([txnRef])
+  @@map("payment_webhook_events")
+}
+
+model Refund {
+  id               String       @id @default(uuid(7)) @db.Char(36)
+  paymentId        String       @db.Char(36)
+  amount           Int
+  reason           String?      @db.VarChar(255)
+  status           RefundStatus @default(REQUESTED)
+  providerRefundNo String?      @db.VarChar(100)
+  processedAt      DateTime?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  payment Payment @relation(fields: [paymentId], references: [id])
+
+  @@index([paymentId])
+  @@map("refunds")
+}
+
+// ═══════════ PROMOTION ═══════════
+model Voucher {
+  id             String      @id @default(uuid(7)) @db.Char(36)
+  code           String      @unique @db.VarChar(40) // service chuẩn hoá UPPERCASE
+  description    String?     @db.VarChar(255)
+  type           VoucherType
+  value          Int // % hoặc VND tuỳ type
+  maxDiscount    Int?
+  minOrderAmount Int         @default(0)
+  startsAt       DateTime
+  endsAt         DateTime
+  usageLimit     Int?
+  usedCount      Int         @default(0) // tăng khi RESERVE, giảm khi RELEASE
+  perUserLimit   Int         @default(1)
+  isActive       Boolean     @default(true)
+
+  redemptions VoucherRedemption[]
+  promotions  Promotion[]
+
+  @@index([isActive, startsAt, endsAt])
+  @@map("vouchers")
+}
+
+model VoucherRedemption {
+  id             String           @id @default(uuid(7)) @db.Char(36)
+  voucherId      String           @db.Char(36)
+  userId         String           @db.Char(36)
+  bookingId      String           @unique @db.Char(36)
+  status         RedemptionStatus @default(RESERVED)
+  discountAmount Int
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  voucher Voucher @relation(fields: [voucherId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+  booking Booking @relation(fields: [bookingId], references: [id])
+
+  @@index([voucherId, userId, status])
+  @@map("voucher_redemptions")
+}
+
+model Promotion {
+  id        String    @id @default(uuid(7)) @db.Char(36)
+  chainId   String?   @db.Char(36) // banner crawl từ cụm rạp nào; NULL = do CineHub tạo
+  dedupKey  String?   @unique @db.Char(40) // sha1(chainCode:linkUrl) để upsert khi crawl
+  title     String    @db.VarChar(200)
+  imageUrl  String    @db.VarChar(500)
+  linkUrl   String?   @db.VarChar(500)
+  voucherId String?   @db.Char(36)
+  startsAt  DateTime? // Galaxy không công bố thời hạn → NULL = không giới hạn
+  endsAt    DateTime?
+  sortOrder Int       @default(0)
+  isActive  Boolean   @default(true)
+
+  chain   CinemaChain? @relation(fields: [chainId], references: [id])
+  voucher Voucher?     @relation(fields: [voucherId], references: [id])
+
+  @@index([isActive, startsAt, endsAt])
+  @@index([chainId])
+  @@map("promotions")
+}
+
+// ═══════════ ENGAGEMENT ═══════════
+model Favorite {
+  userId    String   @db.Char(36)
+  movieId   String   @db.Char(36)
+  createdAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  movie Movie @relation(fields: [movieId], references: [id], onDelete: Cascade)
+
+  @@id([userId, movieId])
+  @@index([movieId])
+  @@map("favorites")
+}
+
+model MovieSubscription {
+  id         String    @id @default(uuid(7)) @db.Char(36)
+  userId     String    @db.Char(36)
+  movieId    String    @db.Char(36)
+  notifiedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  movie Movie @relation(fields: [movieId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, movieId])
+  @@map("movie_subscriptions")
+}
+
+model NotificationLog {
+  id        String             @id @default(uuid(7)) @db.Char(36)
+  userId    String?            @db.Char(36)
+  type      NotificationType
+  status    NotificationStatus @default(PENDING)
+  toAddress String             @db.VarChar(255)
+  // INSERT trước khi gửi; vi phạm unique = đã xử lý. Vd: TICKET_EMAIL:{bookingId}
+  dedupeKey String             @unique @db.VarChar(120)
+  payload   Json?
+  error     String?            @db.VarChar(500)
+  sentAt    DateTime?
+  createdAt DateTime           @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@map("notification_logs")
+}
+
+model Notification {
+  id        String    @id @default(uuid(7)) @db.Char(36)
+  userId    String    @db.Char(36)
+  type      InboxType
+  title     String    @db.VarChar(200)
+  body      String?   @db.VarChar(500)
+  linkUrl   String?   @db.VarChar(500)
+  isRead    Boolean   @default(false)
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead, createdAt])
+  @@map("notifications")
+}
+
+// ═══════════ PLATFORM ═══════════
+model OutboxEvent {
+  id            String       @id @default(uuid(7)) @db.Char(36)
+  aggregateType String       @db.VarChar(50)
+  aggregateId   String       @db.Char(36)
+  eventType     String       @db.VarChar(80) // BookingCreated, PaymentSuccess...
+  payload       Json
+  status        OutboxStatus @default(PENDING)
+  attempts      Int          @default(0)
+  nextAttemptAt DateTime     @default(now()) // backoff khi retry
+  lastError     String?      @db.VarChar(500)
+  correlationId String?      @db.VarChar(64) // trace xuyên service
+  createdAt     DateTime     @default(now())
+  processedAt   DateTime?
+
+  @@index([status, nextAttemptAt])
+  @@index([aggregateType, aggregateId])
+  @@map("outbox_events")
+}
+
+// Phía consumer: INSERT (consumer, eventId) trước khi xử lý; vi phạm unique = bỏ qua
+model InboxEvent {
+  id          String   @id @default(uuid(7)) @db.Char(36)
+  consumer    String   @db.VarChar(50) // vd: worker-email, core-booking
+  eventId     String   @db.Char(36) // = OutboxEvent.id
+  processedAt DateTime @default(now())
+
+  @@unique([consumer, eventId])
+  @@map("inbox_events")
+}

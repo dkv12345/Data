@@ -1,16 +1,26 @@
 {
-  "name": "galaxy",
-  "version": "1.0.0",
-  "description": "",
-  "main": "crawl-galaxycine-2026.js",
+  "name": "galaxy-crawler",
+  "version": "3.0.0",
+  "description": "Galaxy Cinema API Crawler and Normalizer for CineHub Schema v3",
+  "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js",
+    "crawl": "node index.js",
+    "seed": "node seed.js"
   },
-  "keywords": [],
+  "keywords": [
+    "galaxy",
+    "cinema",
+    "crawler",
+    "cinehub",
+    "prisma"
+  ],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "playwright": "^1.63.0"
+    "axios": "^1.7.0",
+    "moment": "^2.30.1",
+    "slugify": "^1.6.6"
   }
 }
