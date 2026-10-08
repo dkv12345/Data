@@ -1,10 +1,10 @@
-# 🎬 CineHub Data - Galaxy Cinema Crawler & Database Normalizer (Prisma Schema v3)
+# CineHub Data - Galaxy Cinema Crawler & Database Normalizer (Prisma Schema v3)
 
 Hệ thống thu thập dữ liệu tự động (ETL Crawler) và chuẩn hoá toàn diện từ **Galaxy Cinema API** & **Next.js Data Engine**, tương thích 100% với cấu trúc cơ sở dữ liệu **CineHub Prisma Schema v3** và **MySQL Migration**.
 
 ---
 
-## 📁 Cấu trúc thư mục chuẩn hoá
+## Cấu trúc thư mục chuẩn hoá
 
 ```plaintext
 galaxy/
@@ -22,7 +22,7 @@ galaxy/
 
 ---
 
-## 🚀 Hướng dẫn cài đặt & Khởi chạy
+## Hướng dẫn cài đặt & Khởi chạy
 
 ### 1. Cài đặt thư viện phụ thuộc
 
@@ -72,7 +72,7 @@ npm run seed
 
 ---
 
-## 🧩 Quy chuẩn ánh xạ dữ liệu (Data Mapping Specification)
+## Quy chuẩn ánh xạ dữ liệu (Data Mapping Specification)
 
 | Thực thể trong Schema v3 | Nguồn thu thập / Quy tắc ánh xạ | Kết quả trong Database |
 | :--- | :--- | :--- |
@@ -93,23 +93,23 @@ npm run seed
 
 ---
 
-## 📊 Thống kê dữ liệu thực tế (Normalized Dataset)
+## Thống kê dữ liệu thực tế (Normalized Dataset)
 
-- 🏛️ **Provinces (Tỉnh / Thành):** 12
-- 🏘️ **Wards (Phường / Xã):** 27
-- 🎬 **Cinemas (Cụm rạp):** 31 rạp toàn quốc
-- 🎟️ **Auditoriums (Phòng chiếu):** 179 phòng
-- 🏷️ **Genres (Thể loại phim):** 14
-- 👤 **Persons (Đạo diễn & Diễn viên):** 172
-- 🎞️ **Movies (Phim):** 43
-- 🔗 **MovieGenres (Quan hệ Phim - Thể loại):** 77
-- 🎭 **MovieCredits (Quan hệ Phim - Phân vai):** 188
-- 📅 **Showtimes (Suất chiếu):** 3,280+
-- 🎁 **Promotions (Khuyến mãi):** 10
+- **Provinces (Tỉnh / Thành):** 12
+- **Wards (Phường / Xã):** 27
+- **Cinemas (Cụm rạp):** 31 rạp toàn quốc
+- **Auditoriums (Phòng chiếu):** 179 phòng
+- **Genres (Thể loại phim):** 14
+- **Persons (Đạo diễn & Diễn viên):** 172
+- **Movies (Phim):** 43
+- **MovieGenres (Quan hệ Phim - Thể loại):** 77
+- **MovieCredits (Quan hệ Phim - Phân vai):** 188
+- **Showtimes (Suất chiếu):** 3,280+
+- **Promotions (Khuyến mãi):** 10
 
 ---
 
-## 🛠️ Công nghệ sử dụng
+## Công nghệ sử dụng
 
 - **Runtime:** Node.js (v18+)
 - **HTTP Engine:** Axios (hỗ trợ Nginx Session Cookie Handshake)
